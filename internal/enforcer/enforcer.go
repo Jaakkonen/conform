@@ -13,6 +13,7 @@ import (
 
 	"github.com/mitchellh/mapstructure"
 	"github.com/pkg/errors"
+	"github.com/pmezard/go-difflib/difflib"
 	yaml "gopkg.in/yaml.v3"
 
 	"github.com/siderolabs/conform/internal/policy"
@@ -122,6 +123,96 @@ func (c *Conform) Enforce(setters ...policy.Option) error {
 type policyWithType struct {
 	policy policy.Policy
 	Type   string
+}
+
+// Format applies fixes for all policies that implement the Fixer interface.
+func (c *Conform) Format(dryRun bool) error {
+	policiesWithTypes, err := c.convertDeclarations()
+	if err != nil {
+		return fmt.Errorf("failed to convert declarations: %w", err)
+	}
+
+	hasChanges := false
+	hasErrors := false
+
+	for _, p := range policiesWithTypes {
+		fixer, ok := p.policy.(policy.Fixer)
+		if !ok {
+			continue
+		}
+
+		report, err := fixer.Fix()
+		if err != nil {
+			log.Printf("ERROR: %s fix failed: %v", p.Type, err)
+
+			hasErrors = true
+
+			continue
+		}
+
+		for _, result := range report.Results {
+			switch {
+			case result.Error != nil:
+				fmt.Printf("ERROR %s: %v\n", result.Path, result.Error)
+
+				hasErrors = true
+			case result.Skipped:
+				fmt.Printf("SKIP  %s: %s\n", result.Path, result.SkipReason)
+			case result.NewContents != nil:
+				if dryRun {
+					diffText, err := generateDiff(result.Path, result.OldContents, result.NewContents)
+					if err != nil {
+						fmt.Printf("ERROR %s: %v\n", result.Path, err)
+
+						hasErrors = true
+
+						continue
+					}
+
+					fmt.Print(diffText)
+				} else {
+					if err := os.WriteFile(result.Path, result.NewContents, 0o644); err != nil {
+						fmt.Printf("ERROR %s: %v\n", result.Path, err)
+
+						hasErrors = true
+
+						continue
+					}
+
+					fmt.Printf("FIXED %s\n", result.Path)
+				}
+
+				hasChanges = true
+			}
+		}
+	}
+
+	if hasErrors {
+		return errors.New("1 or more files failed to fix")
+	}
+
+	if dryRun && hasChanges {
+		return errors.New("files need formatting")
+	}
+
+	return nil
+}
+
+func generateDiff(path string, original, modified []byte) (string, error) {
+	diff := difflib.UnifiedDiff{
+		A:        difflib.SplitLines(string(original)),
+		B:        difflib.SplitLines(string(modified)),
+		FromFile: "a/" + path,
+		ToFile:   "b/" + path,
+		Context:  3,
+	}
+
+	text, err := difflib.GetUnifiedDiffString(diff)
+	if err != nil {
+		return "", errors.Errorf("generating diff for %s: %v", path, err)
+	}
+
+	return text, nil
 }
 
 func (c *Conform) convertDeclarations() ([]policyWithType, error) {

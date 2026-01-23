@@ -7,9 +7,12 @@
 package license_test
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/siderolabs/conform/internal/policy/license"
 )
@@ -90,5 +93,127 @@ func TestLicense(t *testing.T) {
 		}
 		check := l.ValidateLicenseHeaders()
 		assert.Equal(t, "Found 1 files without license header", check.Message())
+	})
+}
+
+func TestLicenseFix(t *testing.T) {
+	const header = `// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at http://mozilla.org/MPL/2.0/.`
+
+	t.Run("FileWithoutHeader", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		testFile := filepath.Join(tmpDir, "test.go")
+		require.NoError(t, os.WriteFile(testFile, []byte("package main\n"), 0o644))
+
+		l := license.Licenses{
+			{
+				Root:            tmpDir,
+				IncludeSuffixes: []string{".go"},
+				Header:          header,
+			},
+		}
+
+		report, err := l.Fix()
+		require.NoError(t, err)
+		require.Len(t, report.Results, 1)
+
+		result := report.Results[0]
+		assert.Equal(t, testFile, result.Path)
+		assert.NotNil(t, result.NewContents)
+		assert.Contains(t, string(result.NewContents), "mozilla.org/MPL/2.0")
+		assert.Contains(t, string(result.NewContents), "package main")
+	})
+
+	t.Run("FileWithShebangAndAllowPreceding", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		testFile := filepath.Join(tmpDir, "test.sh")
+		require.NoError(t, os.WriteFile(testFile, []byte("#!/bin/bash\necho hello\n"), 0o644))
+
+		l := license.Licenses{
+			{
+				Root:                   tmpDir,
+				IncludeSuffixes:        []string{".sh"},
+				AllowPrecedingComments: true,
+				Header:                 header,
+			},
+		}
+
+		report, err := l.Fix()
+		require.NoError(t, err)
+		require.Len(t, report.Results, 1)
+
+		result := report.Results[0]
+		assert.NotNil(t, result.NewContents)
+		assert.True(t, string(result.NewContents[:11]) == "#!/bin/bash", "shebang should be first")
+		assert.Contains(t, string(result.NewContents), "mozilla.org/MPL/2.0")
+		assert.Contains(t, string(result.NewContents), "echo hello")
+	})
+
+	t.Run("FileWithShebangWithoutAllowPreceding", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		testFile := filepath.Join(tmpDir, "test.sh")
+		require.NoError(t, os.WriteFile(testFile, []byte("#!/bin/bash\necho hello\n"), 0o644))
+
+		l := license.Licenses{
+			{
+				Root:                   tmpDir,
+				IncludeSuffixes:        []string{".sh"},
+				AllowPrecedingComments: false,
+				Header:                 header,
+			},
+		}
+
+		report, err := l.Fix()
+		require.NoError(t, err)
+		require.Len(t, report.Results, 1)
+
+		result := report.Results[0]
+		assert.True(t, result.Skipped)
+		assert.Contains(t, result.SkipReason, "shebang")
+		assert.Nil(t, result.NewContents)
+	})
+
+	t.Run("FileAlreadyHasHeader", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		testFile := filepath.Join(tmpDir, "test.go")
+		contentWithHeader := header + "\n\npackage main\n"
+		require.NoError(t, os.WriteFile(testFile, []byte(contentWithHeader), 0o644))
+
+		l := license.Licenses{
+			{
+				Root:            tmpDir,
+				IncludeSuffixes: []string{".go"},
+				Header:          header,
+			},
+		}
+
+		report, err := l.Fix()
+		require.NoError(t, err)
+		assert.Empty(t, report.Results)
+	})
+
+	t.Run("ReturnsOldAndNewContents", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		testFile := filepath.Join(tmpDir, "test.go")
+		originalContent := "package main\n"
+		require.NoError(t, os.WriteFile(testFile, []byte(originalContent), 0o644))
+
+		l := license.Licenses{
+			{
+				Root:            tmpDir,
+				IncludeSuffixes: []string{".go"},
+				Header:          header,
+			},
+		}
+
+		report, err := l.Fix()
+		require.NoError(t, err)
+		require.Len(t, report.Results, 1)
+
+		result := report.Results[0]
+		assert.Equal(t, []byte(originalContent), result.OldContents)
+		assert.NotNil(t, result.NewContents)
+		assert.NotEqual(t, result.OldContents, result.NewContents)
 	})
 }
